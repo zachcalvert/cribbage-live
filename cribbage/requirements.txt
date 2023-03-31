@@ -10,7 +10,7 @@ python-socketio
 six>=1.12
 Flask-FontAwesome
 more_itertools
-redis==3.5.3
+redis==4.4.4
 pytest
 coverage
 fakeredis
