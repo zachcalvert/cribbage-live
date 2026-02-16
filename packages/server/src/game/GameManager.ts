@@ -18,7 +18,7 @@ import {
   NOUNS,
   MATERIALS,
 } from '@cribbage/shared';
-import { createDeck, shuffleDeck, dealCards } from '@cribbage/shared';
+import { createDeck, shuffleDeck, dealCards, cardToString } from '@cribbage/shared';
 import { scoreHand, scoreCrib, scorePegging } from '@cribbage/shared';
 import {
   canPlayCard,
@@ -26,6 +26,7 @@ import {
   isValidPeggingPlay,
   checkForGo,
 } from '@cribbage/shared';
+import type { ScoreBreakdown } from '@cribbage/shared';
 import { BotPlayer } from './Bot.js';
 
 export class GameManager {
@@ -37,6 +38,61 @@ export class GameManager {
   constructor(redis: Redis, io: Server) {
     this.redis = redis;
     this.io = io;
+  }
+
+  // Broadcast a game announcement to all players in a game
+  private announce(gameId: string, message: string): void {
+    this.io.to(gameId).emit('chat_message', {
+      id: `announce-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      playerId: 'announcer',
+      playerName: 'Game',
+      message,
+      timestamp: Date.now(),
+    });
+  }
+
+  // Format pegging score announcement
+  private formatPeggingScore(points: number, count: number, pile: Card[]): string {
+    if (points === 0) return '';
+
+    const parts: string[] = [];
+
+    // Check what caused the points
+    if (count === 15) parts.push('fifteen for 2');
+    if (count === 31) parts.push('thirty-one for 2');
+
+    // Check for pairs (look at the end of the pile)
+    if (pile.length >= 2) {
+      const lastCard = pile[pile.length - 1];
+      let pairCount = 1;
+      for (let i = pile.length - 2; i >= 0; i--) {
+        if (pile[i].rank === lastCard.rank) pairCount++;
+        else break;
+      }
+      if (pairCount === 2) parts.push('pair for 2');
+      else if (pairCount === 3) parts.push('three of a kind for 6');
+      else if (pairCount === 4) parts.push('four of a kind for 12');
+    }
+
+    // Check for runs (simplified - just report if points came from a run)
+    const pairPoints = [0, 0, 2, 6, 12][Math.min(4, this.countPairs(pile))];
+    const fifteenPoints = count === 15 ? 2 : 0;
+    const thirtyOnePoints = count === 31 ? 2 : 0;
+    const runPoints = points - pairPoints - fifteenPoints - thirtyOnePoints;
+    if (runPoints >= 3) parts.push(`run of ${runPoints} for ${runPoints}`);
+
+    return parts.join(', ');
+  }
+
+  private countPairs(pile: Card[]): number {
+    if (pile.length < 2) return 0;
+    const lastCard = pile[pile.length - 1];
+    let count = 1;
+    for (let i = pile.length - 2; i >= 0; i--) {
+      if (pile[i].rank === lastCard.rank) count++;
+      else break;
+    }
+    return count;
   }
 
   private generateGameName(): string {
@@ -261,10 +317,14 @@ export class GameManager {
       const cutIndex = Math.floor(Math.random() * gameState.deck.length);
       gameState.starter = gameState.deck.splice(cutIndex, 1)[0];
 
+      // Announce the starter card
+      this.announce(gameId, `Starter card is ${cardToString(gameState.starter)}`);
+
       // Check for heels (Jack as starter - dealer gets 2 points)
       if (gameState.starter.rank === 'J') {
-        const dealerId = gameState.players[gameState.dealerIndex].id;
-        gameState.scores[dealerId] += 2;
+        const dealer = gameState.players[gameState.dealerIndex];
+        gameState.scores[dealer.id] += 2;
+        this.announce(gameId, `${dealer.name} gets 2 for his heels! :blob-hype:`);
       }
 
       gameState.phase = 'PEGGING';
@@ -342,6 +402,15 @@ export class GameManager {
     const peggingPoints = scorePegging(gameState.peggingState.pile, gameState.peggingState.currentCount);
     gameState.scores[playerId] += peggingPoints;
 
+    // Announce the play
+    let playAnnouncement = `${player.name} plays ${cardToString(card)} for ${gameState.peggingState.currentCount}`;
+    if (peggingPoints > 0) {
+      const scoreDesc = this.formatPeggingScore(peggingPoints, gameState.peggingState.currentCount, gameState.peggingState.pile);
+      playAnnouncement += ` - ${scoreDesc}!`;
+      if (peggingPoints >= 6) playAnnouncement += ' :blob-party:';
+    }
+    this.announce(gameId, playAnnouncement);
+
     // Check for 31 - reset pile
     if (gameState.peggingState.currentCount === 31) {
       gameState.peggingState.pile = [];
@@ -357,12 +426,14 @@ export class GameManager {
       // Last card gets 1 point (if not 31)
       if (gameState.peggingState.currentCount > 0 && gameState.peggingState.currentCount < 31) {
         gameState.scores[playerId] += 1;
+        this.announce(gameId, `${player.name} gets 1 for last card`);
       }
       gameState.phase = 'COUNTING_HANDS';
       gameState.currentPlayerIndex = (gameState.dealerIndex + 1) % gameState.players.length;
+      this.announce(gameId, `Pegging complete! Time to count hands.`);
     } else {
       // Check for Go
-      this.checkForGoAndHandle(gameState);
+      this.checkForGoAndHandle(gameState, gameId);
     }
 
     gameState.updatedAt = Date.now();
@@ -414,12 +485,17 @@ export class GameManager {
     }
 
     gameState.peggingState.consecutivePasses++;
+    this.announce(gameId, `${player.name} says "Go"`);
     gameState.currentPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
 
     // If all players pass, give point to last player and reset
     if (gameState.peggingState.consecutivePasses >= gameState.players.length) {
       if (gameState.peggingState.lastPlayerId) {
+        const lastPlayer = gameState.players.find(p => p.id === gameState.peggingState.lastPlayerId);
         gameState.scores[gameState.peggingState.lastPlayerId] += 1; // Go point
+        if (lastPlayer) {
+          this.announce(gameId, `${lastPlayer.name} gets 1 for the Go`);
+        }
       }
       gameState.peggingState.pile = [];
       gameState.peggingState.currentCount = 0;
@@ -435,7 +511,7 @@ export class GameManager {
     return null;
   }
 
-  private checkForGoAndHandle(gameState: GameState): void {
+  private checkForGoAndHandle(gameState: GameState, gameId: string): void {
     // Skip players who can't play
     let attempts = 0;
     while (attempts < gameState.players.length) {
@@ -449,6 +525,11 @@ export class GameManager {
         break;
       }
 
+      // This player must pass automatically
+      if (currentPlayer.hand.length > 0) {
+        this.announce(gameId, `${currentPlayer.name} says "Go"`);
+      }
+
       gameState.peggingState.consecutivePasses++;
       gameState.currentPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
       attempts++;
@@ -457,7 +538,11 @@ export class GameManager {
     // If all players passed, give Go point and reset
     if (gameState.peggingState.consecutivePasses >= gameState.players.length) {
       if (gameState.peggingState.lastPlayerId) {
+        const lastPlayer = gameState.players.find(p => p.id === gameState.peggingState.lastPlayerId);
         gameState.scores[gameState.peggingState.lastPlayerId] += 1;
+        if (lastPlayer) {
+          this.announce(gameId, `${lastPlayer.name} gets 1 for the Go`);
+        }
       }
       gameState.peggingState.pile = [];
       gameState.peggingState.currentCount = 0;
@@ -482,6 +567,14 @@ export class GameManager {
       const score = scoreHand(currentPlayer.hand, gameState.starter!);
       gameState.scores[currentPlayer.id] += score.total;
 
+      // Announce hand score
+      const handStr = currentPlayer.hand.map(c => cardToString(c)).join(' ');
+      let announcement = `${currentPlayer.name}'s hand: ${handStr} = ${score.total} points`;
+      if (score.total === 0) announcement += ' :blob-cry:';
+      else if (score.total >= 12) announcement += ' :blob-party:';
+      else if (score.total >= 8) announcement += ' :blob-happy:';
+      this.announce(gameId, announcement);
+
       // Move to next player or crib
       gameState.currentPlayerIndex++;
       if (gameState.currentPlayerIndex >= gameState.players.length) {
@@ -494,13 +587,26 @@ export class GameManager {
       const score = scoreCrib(gameState.crib, gameState.starter!);
       gameState.scores[dealer.id] += score.total;
 
+      // Announce crib score
+      const cribStr = gameState.crib.map(c => cardToString(c)).join(' ');
+      let announcement = `${dealer.name}'s crib: ${cribStr} = ${score.total} points`;
+      if (score.total === 0) announcement += ' :blob-cry:';
+      else if (score.total >= 12) announcement += ' :blob-hype:';
+      else if (score.total >= 8) announcement += ' :blob-happy:';
+      this.announce(gameId, announcement);
+
       // Check for winner
       const winner = Object.entries(gameState.scores).find(([_, s]) => s >= gameState.winningScore);
       if (winner) {
+        const winningPlayer = gameState.players.find(p => p.id === winner[0]);
+        if (winningPlayer) {
+          this.announce(gameId, `${winningPlayer.name} wins with ${winner[1]} points! :blob-party: :blob-party: :blob-party:`);
+        }
         gameState.phase = 'GAME_OVER';
       } else {
         // Start new round
         gameState.dealerIndex = (gameState.dealerIndex + 1) % gameState.players.length;
+        const newDealer = gameState.players[gameState.dealerIndex];
         gameState.deck = shuffleDeck(createDeck());
         gameState.crib = [];
         gameState.starter = null;
@@ -521,6 +627,8 @@ export class GameManager {
           consecutivePasses: 0,
           lastPlayerId: null,
         };
+
+        this.announce(gameId, `New round! ${newDealer.name} is the dealer.`);
       }
     }
 
