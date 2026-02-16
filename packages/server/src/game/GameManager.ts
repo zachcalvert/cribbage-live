@@ -186,6 +186,9 @@ export class GameManager {
 
     this.socketToPlayer.set(socket.id, { gameId: payload.gameId, playerId });
 
+    // Announce the new player
+    this.announce(payload.gameId, `${player.name} joined the game :blob-wave:`);
+
     return { player, gameState: this.toClientState(gameState, playerId) };
   }
 
@@ -218,6 +221,9 @@ export class GameManager {
       player: bot,
       gameState: this.toClientState(gameState, gameState.players[0].id),
     });
+
+    // Announce the bot
+    this.announce(gameId, `${botName} joined the game :meow-wave:`);
 
     // Auto-start if game is full
     if (gameState.players.length === gameState.playerCount) {
@@ -662,20 +668,45 @@ export class GameManager {
     if (playerInfo) {
       this.socketToPlayer.delete(socket.id);
       // Mark player as disconnected
-      this.getGame(playerInfo.gameId).then(gameState => {
+      this.getGame(playerInfo.gameId).then(async gameState => {
         if (gameState) {
           const player = gameState.players.find(p => p.id === playerInfo.playerId);
           if (player) {
             player.isConnected = false;
-            this.saveGame(gameState);
-            this.io.to(playerInfo.gameId).emit('player_disconnected', {
-              playerId: playerInfo.playerId,
-              playerName: player.name,
-            });
+
+            // Check if any human players are still connected
+            const connectedHumans = gameState.players.filter(p => !p.isBot && p.isConnected);
+
+            if (connectedHumans.length === 0) {
+              // No humans left - clean up the game
+              await this.deleteGame(playerInfo.gameId);
+              console.log(`Game ${playerInfo.gameId} deleted - no human players remaining`);
+
+              // Clean up any bots associated with this game
+              for (const p of gameState.players) {
+                if (p.isBot) {
+                  this.bots.delete(p.id);
+                }
+              }
+            } else {
+              // Still have humans - just save and notify
+              await this.saveGame(gameState);
+              this.io.to(playerInfo.gameId).emit('player_disconnected', {
+                playerId: playerInfo.playerId,
+                playerName: player.name,
+              });
+              // Announce the disconnect
+              this.announce(playerInfo.gameId, `${player.name} left the game :blob-cry:`);
+            }
           }
         }
       });
     }
+  }
+
+  private async deleteGame(gameId: string): Promise<void> {
+    const key = `game:${gameId}`;
+    await this.redis.del(key);
   }
 
   getPlayerId(socket: Socket): string {
