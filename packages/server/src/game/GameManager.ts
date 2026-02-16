@@ -29,6 +29,22 @@ import {
 import type { ScoreBreakdown } from '@cribbage/shared';
 import { BotPlayer } from './Bot.js';
 
+const METRICS_TTL_SECONDS = 60 * 60 * 24; // 24 hours
+
+export interface GameMetrics {
+  last24Hours: {
+    gamesStarted: number;
+    uniqueHumanPlayers: number;
+  };
+  recentGames: {
+    name: string;
+    players: string[];
+    startTime: string;
+    endTime: string | null;
+    winner: string | null;
+  }[];
+}
+
 export class GameManager {
   private redis: Redis;
   private io: Server;
@@ -38,6 +54,80 @@ export class GameManager {
   constructor(redis: Redis, io: Server) {
     this.redis = redis;
     this.io = io;
+  }
+
+  // ============ Metrics Methods ============
+
+  private async trackHumanPlayer(playerName: string): Promise<void> {
+    const now = Date.now();
+    await this.redis.zadd('metrics:human_players', now, playerName);
+    // Clean up old entries (older than 24 hours)
+    const cutoff = now - (24 * 60 * 60 * 1000);
+    await this.redis.zremrangebyscore('metrics:human_players', '-inf', cutoff);
+  }
+
+  private async trackGameStarted(gameId: string, gameName: string, players: { name: string; isBot: boolean }[]): Promise<void> {
+    const now = Date.now();
+
+    // Add to sorted set for counting
+    await this.redis.zadd('metrics:games_started', now, gameId);
+
+    // Clean up old entries
+    const cutoff = now - (24 * 60 * 60 * 1000);
+    await this.redis.zremrangebyscore('metrics:games_started', '-inf', cutoff);
+
+    // Store per-game details
+    const gameMetric = {
+      name: gameName,
+      players: players.map(p => p.name),
+      startTime: new Date(now).toISOString(),
+      endTime: null,
+      winner: null,
+    };
+    await this.redis.setex(`metrics:game:${gameId}`, METRICS_TTL_SECONDS, JSON.stringify(gameMetric));
+  }
+
+  private async trackGameEnded(gameId: string, winnerName: string): Promise<void> {
+    const key = `metrics:game:${gameId}`;
+    const data = await this.redis.get(key);
+    if (data) {
+      const gameMetric = JSON.parse(data);
+      gameMetric.endTime = new Date().toISOString();
+      gameMetric.winner = winnerName;
+      // Reset TTL when updating
+      await this.redis.setex(key, METRICS_TTL_SECONDS, JSON.stringify(gameMetric));
+    }
+  }
+
+  async getMetrics(): Promise<GameMetrics> {
+    const now = Date.now();
+    const cutoff = now - (24 * 60 * 60 * 1000);
+
+    // Count games started in last 24 hours
+    const gamesStarted = await this.redis.zcount('metrics:games_started', cutoff, '+inf');
+
+    // Count unique human players in last 24 hours
+    const uniqueHumanPlayers = await this.redis.zcount('metrics:human_players', cutoff, '+inf');
+
+    // Get recent game IDs (last 20)
+    const recentGameIds = await this.redis.zrevrange('metrics:games_started', 0, 19);
+
+    // Fetch details for each recent game
+    const recentGames: GameMetrics['recentGames'] = [];
+    for (const gameId of recentGameIds) {
+      const data = await this.redis.get(`metrics:game:${gameId}`);
+      if (data) {
+        recentGames.push(JSON.parse(data));
+      }
+    }
+
+    return {
+      last24Hours: {
+        gamesStarted,
+        uniqueHumanPlayers,
+      },
+      recentGames,
+    };
   }
 
   // Broadcast a game announcement to all players in a game
@@ -148,6 +238,9 @@ export class GameManager {
     this.socketToPlayer.set(socket.id, { gameId, playerId });
     socket.join(gameId);
 
+    // Track human player for metrics
+    await this.trackHumanPlayer(payload.playerName);
+
     // Add bot if requested
     if (payload.addBot && gameState.players.length < payload.playerCount) {
       await this.addBot(gameId);
@@ -187,6 +280,9 @@ export class GameManager {
     await this.saveGame(gameState);
 
     this.socketToPlayer.set(socket.id, { gameId: payload.gameId, playerId });
+
+    // Track human player for metrics
+    await this.trackHumanPlayer(payload.playerName);
 
     // Announce the new player
     this.announce(payload.gameId, `${player.name} joined the game :blob-wave:`);
@@ -257,6 +353,9 @@ export class GameManager {
 
     gameState.phase = 'DISCARDING_TO_CRIB';
     gameState.updatedAt = Date.now();
+
+    // Track game started for metrics
+    await this.trackGameStarted(gameId, gameState.name, gameState.players);
 
     await this.saveGame(gameState);
 
@@ -594,21 +693,28 @@ export class GameManager {
       else if (score.total >= 8) announcement += ' :blob-happy:';
       this.announce(gameId, announcement);
 
-      // Move to next player (wrapping around)
-      const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
-
-      // We've counted all hands when we return to the player after the dealer
-      const firstCountingPlayer = (gameState.dealerIndex + 1) % gameState.players.length;
-
-      console.log(`[COUNTING] currentIndex=${gameState.currentPlayerIndex}, nextIndex=${nextPlayerIndex}, firstCountingPlayer=${firstCountingPlayer}, dealerIndex=${gameState.dealerIndex}`);
-
-      if (nextPlayerIndex === firstCountingPlayer) {
-        // All hands counted, move to crib
-        gameState.phase = 'COUNTING_CRIB';
-        gameState.currentPlayerIndex = gameState.dealerIndex;
-        console.log(`[COUNTING] All hands counted, moving to COUNTING_CRIB`);
+      // Check for winner after hand scoring
+      if (gameState.scores[currentPlayer.id] >= gameState.winningScore) {
+        this.announce(gameId, `${currentPlayer.name} wins with ${gameState.scores[currentPlayer.id]} points! :blob-party: :blob-party: :blob-party:`);
+        await this.trackGameEnded(gameId, currentPlayer.name);
+        gameState.phase = 'GAME_OVER';
       } else {
-        gameState.currentPlayerIndex = nextPlayerIndex;
+        // Move to next player (wrapping around)
+        const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
+
+        // We've counted all hands when we return to the player after the dealer
+        const firstCountingPlayer = (gameState.dealerIndex + 1) % gameState.players.length;
+
+        console.log(`[COUNTING] currentIndex=${gameState.currentPlayerIndex}, nextIndex=${nextPlayerIndex}, firstCountingPlayer=${firstCountingPlayer}, dealerIndex=${gameState.dealerIndex}`);
+
+        if (nextPlayerIndex === firstCountingPlayer) {
+          // All hands counted, move to crib
+          gameState.phase = 'COUNTING_CRIB';
+          gameState.currentPlayerIndex = gameState.dealerIndex;
+          console.log(`[COUNTING] All hands counted, moving to COUNTING_CRIB`);
+        } else {
+          gameState.currentPlayerIndex = nextPlayerIndex;
+        }
       }
     } else if (gameState.phase === 'COUNTING_CRIB') {
       // Score crib
@@ -630,6 +736,8 @@ export class GameManager {
         const winningPlayer = gameState.players.find(p => p.id === winner[0]);
         if (winningPlayer) {
           this.announce(gameId, `${winningPlayer.name} wins with ${winner[1]} points! :blob-party: :blob-party: :blob-party:`);
+          // Track game ended for metrics
+          await this.trackGameEnded(gameId, winningPlayer.name);
         }
         gameState.phase = 'GAME_OVER';
       } else {

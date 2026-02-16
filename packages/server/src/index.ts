@@ -34,7 +34,18 @@ redisClient.on('error', (err) => {
   console.error('Redis error:', err);
 });
 
-setupSocketHandlers(io, redisClient);
+const gameManager = setupSocketHandlers(io, redisClient);
+
+// Metrics endpoint
+app.get('/api/metrics', async (_req, res) => {
+  try {
+    const metrics = await gameManager.getMetrics();
+    res.json(metrics);
+  } catch (error) {
+    console.error('Error fetching metrics:', error);
+    res.status(500).json({ error: 'Failed to fetch metrics' });
+  }
+});
 
 const PORT = process.env.PORT || 3001;
 

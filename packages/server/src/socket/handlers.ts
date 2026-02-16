@@ -9,7 +9,7 @@ import type {
   SendChatPayload,
 } from '@cribbage/shared';
 
-export function setupSocketHandlers(io: Server, redis: Redis): void {
+export function setupSocketHandlers(io: Server, redis: Redis): GameManager {
   const gameManager = new GameManager(redis, io);
 
   io.on('connection', (socket: Socket) => {
@@ -108,4 +108,6 @@ export function setupSocketHandlers(io: Server, redis: Redis): void {
       gameManager.handleDisconnect(socket);
     });
   });
+
+  return gameManager;
 }
