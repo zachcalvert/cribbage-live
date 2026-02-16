@@ -116,6 +116,7 @@ export class GameManager {
       isBot: false,
       isConnected: true,
       hand: [],
+      countingHand: [],
     };
 
     const gameState: GameState = {
@@ -176,6 +177,7 @@ export class GameManager {
       isBot: false,
       isConnected: true,
       hand: [],
+      countingHand: [],
     };
 
     gameState.players.push(player);
@@ -206,6 +208,7 @@ export class GameManager {
       isBot: true,
       isConnected: true,
       hand: [],
+      countingHand: [],
     };
 
     gameState.players.push(bot);
@@ -331,6 +334,12 @@ export class GameManager {
         const dealer = gameState.players[gameState.dealerIndex];
         gameState.scores[dealer.id] += 2;
         this.announce(gameId, `${dealer.name} gets 2 for his heels! :blob-hype:`);
+      }
+
+      // Store each player's hand for display during counting phase
+      for (const p of gameState.players) {
+        p.countingHand = [...p.hand];
+        console.log(`[PRESERVE] Storing ${p.name}'s countingHand:`, p.countingHand.map(c => `${c.rank}${c.suit}`));
       }
 
       gameState.phase = 'PEGGING';
@@ -568,24 +577,38 @@ export class GameManager {
     }
 
     if (gameState.phase === 'COUNTING_HANDS') {
-      // Score current player's hand
+      // Score current player's hand (use countingHand which was preserved before pegging)
       const currentPlayer = gameState.players[gameState.currentPlayerIndex];
-      const score = scoreHand(currentPlayer.hand, gameState.starter!);
+      const handToScore = currentPlayer.countingHand;
+
+      console.log(`[COUNTING] Scoring ${currentPlayer.name}'s hand:`, handToScore.map(c => `${c.rank}${c.suit}`));
+
+      const score = scoreHand(handToScore, gameState.starter!);
       gameState.scores[currentPlayer.id] += score.total;
 
       // Announce hand score
-      const handStr = currentPlayer.hand.map(c => cardToString(c)).join(' ');
+      const handStr = handToScore.map(c => cardToString(c)).join(' ');
       let announcement = `${currentPlayer.name}'s hand: ${handStr} = ${score.total} points`;
       if (score.total === 0) announcement += ' :blob-cry:';
       else if (score.total >= 12) announcement += ' :blob-party:';
       else if (score.total >= 8) announcement += ' :blob-happy:';
       this.announce(gameId, announcement);
 
-      // Move to next player or crib
-      gameState.currentPlayerIndex++;
-      if (gameState.currentPlayerIndex >= gameState.players.length) {
+      // Move to next player (wrapping around)
+      const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
+
+      // We've counted all hands when we return to the player after the dealer
+      const firstCountingPlayer = (gameState.dealerIndex + 1) % gameState.players.length;
+
+      console.log(`[COUNTING] currentIndex=${gameState.currentPlayerIndex}, nextIndex=${nextPlayerIndex}, firstCountingPlayer=${firstCountingPlayer}, dealerIndex=${gameState.dealerIndex}`);
+
+      if (nextPlayerIndex === firstCountingPlayer) {
+        // All hands counted, move to crib
         gameState.phase = 'COUNTING_CRIB';
         gameState.currentPlayerIndex = gameState.dealerIndex;
+        console.log(`[COUNTING] All hands counted, moving to COUNTING_CRIB`);
+      } else {
+        gameState.currentPlayerIndex = nextPlayerIndex;
       }
     } else if (gameState.phase === 'COUNTING_CRIB') {
       // Score crib
@@ -750,6 +773,8 @@ export class GameManager {
   }
 
   private toClientState(gameState: GameState, playerId: string): ClientGameState {
+    const isCountingPhase = gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB';
+
     return {
       id: gameState.id,
       name: gameState.name,
@@ -760,9 +785,13 @@ export class GameManager {
         isConnected: p.isConnected,
         handCount: p.hand.length,
         hand: p.id === playerId ? p.hand : undefined,
+        // Include countingHand for all players during counting phases
+        countingHand: isCountingPhase ? p.countingHand : undefined,
         teamId: p.teamId,
       })),
       cribCount: gameState.crib.length,
+      // Show crib during COUNTING_CRIB phase
+      crib: gameState.phase === 'COUNTING_CRIB' ? gameState.crib : undefined,
       starter: gameState.starter,
       currentPlayerIndex: gameState.currentPlayerIndex,
       dealerIndex: gameState.dealerIndex,

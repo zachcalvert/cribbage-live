@@ -186,86 +186,143 @@ export default function GameBoard() {
         {/* Active Game */}
         {gameState.phase !== 'WAITING_FOR_PLAYERS' && gameState.phase !== 'GAME_OVER' && (
           <div className="flex-1 flex flex-col min-h-0 justify-between">
-            {/* Other Players' Hands */}
-            <div className="flex justify-center gap-4 lg:gap-8 flex-wrap flex-shrink-0">
-              {gameState.players
-                .filter(p => p.id !== gameState.myPlayerId)
-                .map((player, index) => (
-                  <Hand
-                    key={player.id}
-                    cardCount={player.handCount}
-                    selectedCards={[]}
-                    label={player.name + (player.isBot ? ' [Bot]' : '')}
-                    isCurrentPlayer={gameState.players[gameState.currentPlayerIndex]?.id === player.id}
-                  />
-                ))}
-            </div>
-
-            {/* Play Area */}
-            <div className="flex-1 flex items-center justify-center py-2 lg:py-4 min-h-0">
-              <PlayArea
-                peggingState={gameState.peggingState}
-                starter={gameState.starter}
-                cribCount={gameState.cribCount}
-                isDealer={isDealer}
-              />
-            </div>
-
-            {/* My Hand */}
-            <div className="flex-shrink-0">
-              <Hand
-                cards={currentPlayer?.hand}
-                selectedCards={selectedCards}
-                onCardClick={handleCardClick}
-                disabled={!isMyTurn && gameState.phase !== 'DISCARDING_TO_CRIB'}
-                label={`${currentPlayer?.name || 'You'} (you)`}
-                isCurrentPlayer={isMyTurn}
-              />
-
-              {/* Action Buttons */}
-              <div className="mt-3 lg:mt-4 flex justify-center gap-4">
-                {gameState.phase === 'DISCARDING_TO_CRIB' && (
-                  <button
-                    onClick={handleDiscard}
-                    disabled={selectedCards.length !== DISCARDS_PER_PLAYER[gameState.playerCount]}
-                    className="bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
-                  >
-                    Discard to Crib ({selectedCards.length}/{DISCARDS_PER_PLAYER[gameState.playerCount]})
-                  </button>
+            {/* Counting Phase Display */}
+            {(gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB') && (
+              <div className="flex-1 flex flex-col items-center justify-center gap-4 py-2">
+                {/* Show starter card */}
+                {gameState.starter && (
+                  <div className="text-center mb-2">
+                    <p className="text-green-200 text-sm mb-1">Starter Card</p>
+                    <Card card={gameState.starter} />
+                  </div>
                 )}
 
-                {gameState.phase === 'PEGGING' && isMyTurn && !canPlayAnyCard && (
-                  <button
-                    onClick={handlePass}
-                    className="bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
-                  >
-                    Go (Can't Play)
-                  </button>
+                {/* Show all players' hands during COUNTING_HANDS */}
+                {gameState.phase === 'COUNTING_HANDS' && (
+                  <div className="flex flex-wrap justify-center gap-4 lg:gap-6">
+                    {gameState.players.map((player, index) => (
+                      <div key={player.id} className="text-center">
+                        <p className={`text-sm mb-1 ${
+                          index === gameState.currentPlayerIndex
+                            ? 'text-amber-300 font-bold'
+                            : 'text-green-200'
+                        }`}>
+                          {player.name}
+                          {player.id === gameState.myPlayerId && ' (you)'}
+                          {index === gameState.currentPlayerIndex && ' - Counting'}
+                        </p>
+                        <div className="flex gap-1 justify-center">
+                          {player.countingHand?.map(card => (
+                            <Card key={card.id} card={card} small />
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 )}
 
-                {(gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB') && (
-                  <button
-                    onClick={handleContinue}
-                    className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
-                  >
-                    Continue
-                  </button>
+                {/* Show crib during COUNTING_CRIB */}
+                {gameState.phase === 'COUNTING_CRIB' && (
+                  <div className="text-center">
+                    <p className="text-amber-300 font-bold text-sm mb-1">
+                      {gameState.players[gameState.dealerIndex]?.name}'s Crib
+                    </p>
+                    <div className="flex gap-1 justify-center">
+                      {gameState.crib?.map(card => (
+                        <Card key={card.id} card={card} small />
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
+            )}
 
-              {/* Turn Indicator */}
-              {gameState.phase === 'PEGGING' && (
-                <div className="mt-2 lg:mt-3 text-center">
-                  {isMyTurn ? (
-                    <span className="text-amber-300 font-bold text-sm lg:text-base">Your turn!</span>
-                  ) : (
-                    <span className="text-green-200 text-sm lg:text-base">
-                      Waiting for {gameState.players[gameState.currentPlayerIndex]?.name}...
-                    </span>
-                  )}
-                </div>
+            {/* Non-counting phases: Other Players' Hands */}
+            {gameState.phase !== 'COUNTING_HANDS' && gameState.phase !== 'COUNTING_CRIB' && (
+              <div className="flex justify-center gap-4 lg:gap-8 flex-wrap flex-shrink-0">
+                {gameState.players
+                  .filter(p => p.id !== gameState.myPlayerId)
+                  .map((player, index) => (
+                    <Hand
+                      key={player.id}
+                      cardCount={player.handCount}
+                      selectedCards={[]}
+                      label={player.name + (player.isBot ? ' [Bot]' : '')}
+                      isCurrentPlayer={gameState.players[gameState.currentPlayerIndex]?.id === player.id}
+                    />
+                  ))}
+              </div>
+            )}
+
+            {/* Play Area - only show during non-counting phases */}
+            {gameState.phase !== 'COUNTING_HANDS' && gameState.phase !== 'COUNTING_CRIB' && (
+              <div className="flex-1 flex items-center justify-center py-2 lg:py-4 min-h-0">
+                <PlayArea
+                  peggingState={gameState.peggingState}
+                  starter={gameState.starter}
+                  cribCount={gameState.cribCount}
+                  isDealer={isDealer}
+                />
+              </div>
+            )}
+
+            {/* My Hand - only show during non-counting phases */}
+            {gameState.phase !== 'COUNTING_HANDS' && gameState.phase !== 'COUNTING_CRIB' && (
+              <div className="flex-shrink-0">
+                <Hand
+                  cards={currentPlayer?.hand}
+                  selectedCards={selectedCards}
+                  onCardClick={handleCardClick}
+                  disabled={!isMyTurn && gameState.phase !== 'DISCARDING_TO_CRIB'}
+                  label={`${currentPlayer?.name || 'You'} (you)`}
+                  isCurrentPlayer={isMyTurn}
+                />
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="mt-3 lg:mt-4 flex justify-center gap-4 flex-shrink-0">
+              {gameState.phase === 'DISCARDING_TO_CRIB' && (
+                <button
+                  onClick={handleDiscard}
+                  disabled={selectedCards.length !== DISCARDS_PER_PLAYER[gameState.playerCount]}
+                  className="bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
+                >
+                  Discard to Crib ({selectedCards.length}/{DISCARDS_PER_PLAYER[gameState.playerCount]})
+                </button>
+              )}
+
+              {gameState.phase === 'PEGGING' && isMyTurn && !canPlayAnyCard && (
+                <button
+                  onClick={handlePass}
+                  className="bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
+                >
+                  Go (Can't Play)
+                </button>
+              )}
+
+              {(gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB') && (
+                <button
+                  onClick={handleContinue}
+                  className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
+                >
+                  Continue
+                </button>
               )}
             </div>
+
+            {/* Turn Indicator */}
+            {gameState.phase === 'PEGGING' && (
+              <div className="mt-2 lg:mt-3 text-center flex-shrink-0">
+                {isMyTurn ? (
+                  <span className="text-amber-300 font-bold text-sm lg:text-base">Your turn!</span>
+                ) : (
+                  <span className="text-green-200 text-sm lg:text-base">
+                    Waiting for {gameState.players[gameState.currentPlayerIndex]?.name}...
+                  </span>
+                )}
+              </div>
+            )}
           </div>
         )}
 

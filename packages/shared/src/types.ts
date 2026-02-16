@@ -13,6 +13,7 @@ export interface Player {
   isBot: boolean;
   isConnected: boolean;
   hand: Card[];
+  countingHand: Card[]; // Preserved for display during counting phase
   teamId?: number; // For 4-player team games
 }
 
@@ -104,6 +105,7 @@ export interface ClientGameState {
   name: string;
   players: ClientPlayer[];
   cribCount: number;
+  crib?: Card[]; // Shown during COUNTING_CRIB phase
   starter: Card | null;
   currentPlayerIndex: number;
   dealerIndex: number;
@@ -121,7 +123,8 @@ export interface ClientPlayer {
   isBot: boolean;
   isConnected: boolean;
   handCount: number;
-  hand?: Card[]; // Only present for the current player
+  hand?: Card[]; // Only present for the current player during pegging
+  countingHand?: Card[]; // Shown during counting phases
   teamId?: number;
 }
 
