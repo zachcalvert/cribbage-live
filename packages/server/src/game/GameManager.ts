@@ -1,0 +1,664 @@
+import type { Server, Socket } from 'socket.io';
+import type Redis from 'ioredis';
+import type {
+  GameState,
+  ClientGameState,
+  CreateGamePayload,
+  JoinGamePayload,
+  DiscardToCribPayload,
+  PlayCardPayload,
+  Player,
+  Card,
+} from '@cribbage/shared';
+import {
+  GAME_TTL_SECONDS,
+  CARDS_PER_PLAYER,
+  DISCARDS_PER_PLAYER,
+  ADJECTIVES,
+  NOUNS,
+  MATERIALS,
+} from '@cribbage/shared';
+import { createDeck, shuffleDeck, dealCards } from '@cribbage/shared';
+import { scoreHand, scoreCrib, scorePegging } from '@cribbage/shared';
+import {
+  canPlayCard,
+  getCardValue,
+  isValidPeggingPlay,
+  checkForGo,
+} from '@cribbage/shared';
+import { BotPlayer } from './Bot.js';
+
+export class GameManager {
+  private redis: Redis;
+  private io: Server;
+  private socketToPlayer: Map<string, { gameId: string; playerId: string }> = new Map();
+  private bots: Map<string, BotPlayer> = new Map();
+
+  constructor(redis: Redis, io: Server) {
+    this.redis = redis;
+    this.io = io;
+  }
+
+  private generateGameName(): string {
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+    const mat = MATERIALS[Math.floor(Math.random() * MATERIALS.length)];
+    return `${adj}-${noun}-${mat}`;
+  }
+
+  private generateId(): string {
+    return Math.random().toString(36).substring(2, 15);
+  }
+
+  async createGame(socket: Socket, payload: CreateGamePayload): Promise<{ gameId: string; gameState: ClientGameState }> {
+    const gameId = this.generateGameName();
+    const playerId = this.generateId();
+
+    const player: Player = {
+      id: playerId,
+      name: payload.playerName,
+      isBot: false,
+      isConnected: true,
+      hand: [],
+    };
+
+    const gameState: GameState = {
+      id: gameId,
+      name: gameId,
+      players: [player],
+      deck: [],
+      crib: [],
+      starter: null,
+      currentPlayerIndex: 0,
+      dealerIndex: 0,
+      phase: 'WAITING_FOR_PLAYERS',
+      peggingState: {
+        pile: [],
+        currentCount: 0,
+        playedCardIds: new Set(),
+        consecutivePasses: 0,
+        lastPlayerId: null,
+      },
+      scores: { [playerId]: 0 },
+      winningScore: payload.winningScore,
+      playerCount: payload.playerCount,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    await this.saveGame(gameState);
+
+    this.socketToPlayer.set(socket.id, { gameId, playerId });
+    socket.join(gameId);
+
+    // Add bot if requested
+    if (payload.addBot && gameState.players.length < payload.playerCount) {
+      await this.addBot(gameId);
+    }
+
+    return { gameId, gameState: this.toClientState(gameState, playerId) };
+  }
+
+  async joinGame(socket: Socket, payload: JoinGamePayload): Promise<{ player: Player; gameState: ClientGameState }> {
+    const gameState = await this.getGame(payload.gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    if (gameState.players.length >= gameState.playerCount) {
+      throw new Error('Game is full');
+    }
+
+    if (gameState.phase !== 'WAITING_FOR_PLAYERS') {
+      throw new Error('Game has already started');
+    }
+
+    const playerId = this.generateId();
+    const player: Player = {
+      id: playerId,
+      name: payload.playerName,
+      isBot: false,
+      isConnected: true,
+      hand: [],
+    };
+
+    gameState.players.push(player);
+    gameState.scores[playerId] = 0;
+    gameState.updatedAt = Date.now();
+
+    await this.saveGame(gameState);
+
+    this.socketToPlayer.set(socket.id, { gameId: payload.gameId, playerId });
+
+    return { player, gameState: this.toClientState(gameState, playerId) };
+  }
+
+  async addBot(gameId: string): Promise<void> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) return;
+
+    const botId = this.generateId();
+    const botNames = ['Bot Alice', 'Bot Bob', 'Bot Charlie', 'Bot Diana'];
+    const botName = botNames[gameState.players.length] || `Bot ${gameState.players.length + 1}`;
+
+    const bot: Player = {
+      id: botId,
+      name: botName,
+      isBot: true,
+      isConnected: true,
+      hand: [],
+    };
+
+    gameState.players.push(bot);
+    gameState.scores[botId] = 0;
+    gameState.updatedAt = Date.now();
+
+    await this.saveGame(gameState);
+
+    const botPlayer = new BotPlayer(botId, botName, this, gameId);
+    this.bots.set(botId, botPlayer);
+
+    this.io.to(gameId).emit('player_joined', {
+      player: bot,
+      gameState: this.toClientState(gameState, gameState.players[0].id),
+    });
+
+    // Auto-start if game is full
+    if (gameState.players.length === gameState.playerCount) {
+      await this.startGame(gameId);
+    }
+  }
+
+  async startGame(gameId: string): Promise<ClientGameState> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    if (gameState.players.length < gameState.playerCount) {
+      throw new Error('Not enough players');
+    }
+
+    // Create and shuffle deck
+    gameState.deck = shuffleDeck(createDeck());
+
+    // Deal cards
+    const cardsPerPlayer = CARDS_PER_PLAYER[gameState.playerCount];
+    for (const player of gameState.players) {
+      const { dealt, remaining } = dealCards(gameState.deck, cardsPerPlayer);
+      player.hand = dealt;
+      gameState.deck = remaining;
+    }
+
+    gameState.phase = 'DISCARDING_TO_CRIB';
+    gameState.updatedAt = Date.now();
+
+    await this.saveGame(gameState);
+
+    // Emit individual states to each player
+    for (const player of gameState.players) {
+      if (!player.isBot) {
+        const socket = this.getSocketByPlayerId(player.id);
+        if (socket) {
+          socket.emit('game_started', this.toClientState(gameState, player.id));
+        }
+      }
+    }
+
+    // Trigger bot actions
+    this.triggerBotActions(gameId);
+
+    return this.toClientState(gameState, gameState.players[0].id);
+  }
+
+  async discardToCrib(socket: Socket, payload: DiscardToCribPayload): Promise<ClientGameState | null> {
+    const playerInfo = this.socketToPlayer.get(socket.id);
+    if (!playerInfo) {
+      throw new Error('Player not in a game');
+    }
+
+    return this.processDiscard(playerInfo.playerId, payload.gameId, payload.cardIds);
+  }
+
+  async processDiscard(playerId: string, gameId: string, cardIds: string[]): Promise<ClientGameState | null> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    if (gameState.phase !== 'DISCARDING_TO_CRIB') {
+      throw new Error('Not in discard phase');
+    }
+
+    const player = gameState.players.find(p => p.id === playerId);
+    if (!player) {
+      throw new Error('Player not found');
+    }
+
+    const expectedDiscards = DISCARDS_PER_PLAYER[gameState.playerCount];
+    if (cardIds.length !== expectedDiscards) {
+      throw new Error(`Must discard exactly ${expectedDiscards} cards`);
+    }
+
+    // Move cards from hand to crib
+    const discardedCards: Card[] = [];
+    for (const cardId of cardIds) {
+      const cardIndex = player.hand.findIndex(c => c.id === cardId);
+      if (cardIndex === -1) {
+        throw new Error('Card not in hand');
+      }
+      discardedCards.push(player.hand[cardIndex]);
+      player.hand.splice(cardIndex, 1);
+    }
+
+    gameState.crib.push(...discardedCards);
+    gameState.updatedAt = Date.now();
+
+    // Check if all players have discarded
+    const expectedCribSize = gameState.playerCount * expectedDiscards;
+    if (gameState.crib.length >= expectedCribSize) {
+      // Cut for starter
+      const cutIndex = Math.floor(Math.random() * gameState.deck.length);
+      gameState.starter = gameState.deck.splice(cutIndex, 1)[0];
+
+      // Check for heels (Jack as starter - dealer gets 2 points)
+      if (gameState.starter.rank === 'J') {
+        const dealerId = gameState.players[gameState.dealerIndex].id;
+        gameState.scores[dealerId] += 2;
+      }
+
+      gameState.phase = 'PEGGING';
+      gameState.currentPlayerIndex = (gameState.dealerIndex + 1) % gameState.players.length;
+      gameState.peggingState = {
+        pile: [],
+        currentCount: 0,
+        playedCardIds: new Set(),
+        consecutivePasses: 0,
+        lastPlayerId: null,
+      };
+    }
+
+    await this.saveGame(gameState);
+
+    // Emit updates to all players
+    this.emitGameUpdate(gameState);
+
+    // Trigger bot actions
+    this.triggerBotActions(gameId);
+
+    return null; // Updates sent via emit
+  }
+
+  async playCard(socket: Socket, payload: PlayCardPayload): Promise<ClientGameState | null> {
+    const playerInfo = this.socketToPlayer.get(socket.id);
+    if (!playerInfo) {
+      throw new Error('Player not in a game');
+    }
+
+    return this.processPlayCard(playerInfo.playerId, payload.gameId, payload.cardId);
+  }
+
+  async processPlayCard(playerId: string, gameId: string, cardId: string): Promise<ClientGameState | null> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    if (gameState.phase !== 'PEGGING') {
+      throw new Error('Not in pegging phase');
+    }
+
+    const currentPlayer = gameState.players[gameState.currentPlayerIndex];
+    if (currentPlayer.id !== playerId) {
+      throw new Error('Not your turn');
+    }
+
+    const player = gameState.players.find(p => p.id === playerId);
+    if (!player) {
+      throw new Error('Player not found');
+    }
+
+    const cardIndex = player.hand.findIndex(c => c.id === cardId);
+    if (cardIndex === -1) {
+      throw new Error('Card not in hand');
+    }
+
+    const card = player.hand[cardIndex];
+    const cardValue = getCardValue(card);
+
+    if (!isValidPeggingPlay(gameState.peggingState.currentCount, cardValue)) {
+      throw new Error('Invalid play - would exceed 31');
+    }
+
+    // Play the card
+    player.hand.splice(cardIndex, 1);
+    gameState.peggingState.pile.push(card);
+    gameState.peggingState.playedCardIds.add(cardId);
+    gameState.peggingState.currentCount += cardValue;
+    gameState.peggingState.lastPlayerId = playerId;
+    gameState.peggingState.consecutivePasses = 0;
+
+    // Score pegging points
+    const peggingPoints = scorePegging(gameState.peggingState.pile, gameState.peggingState.currentCount);
+    gameState.scores[playerId] += peggingPoints;
+
+    // Check for 31 - reset pile
+    if (gameState.peggingState.currentCount === 31) {
+      gameState.peggingState.pile = [];
+      gameState.peggingState.currentCount = 0;
+    }
+
+    // Move to next player
+    gameState.currentPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
+
+    // Check if pegging is complete (all cards played)
+    const allCardsPlayed = gameState.players.every(p => p.hand.length === 0);
+    if (allCardsPlayed) {
+      // Last card gets 1 point (if not 31)
+      if (gameState.peggingState.currentCount > 0 && gameState.peggingState.currentCount < 31) {
+        gameState.scores[playerId] += 1;
+      }
+      gameState.phase = 'COUNTING_HANDS';
+      gameState.currentPlayerIndex = (gameState.dealerIndex + 1) % gameState.players.length;
+    } else {
+      // Check for Go
+      this.checkForGoAndHandle(gameState);
+    }
+
+    gameState.updatedAt = Date.now();
+    await this.saveGame(gameState);
+
+    this.emitGameUpdate(gameState);
+    this.triggerBotActions(gameId);
+
+    return null;
+  }
+
+  async pass(socket: Socket, gameId: string): Promise<ClientGameState | null> {
+    const playerInfo = this.socketToPlayer.get(socket.id);
+    if (!playerInfo) {
+      throw new Error('Player not in a game');
+    }
+
+    return this.processPass(playerInfo.playerId, gameId);
+  }
+
+  async processPass(playerId: string, gameId: string): Promise<ClientGameState | null> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    if (gameState.phase !== 'PEGGING') {
+      throw new Error('Not in pegging phase');
+    }
+
+    const currentPlayer = gameState.players[gameState.currentPlayerIndex];
+    if (currentPlayer.id !== playerId) {
+      throw new Error('Not your turn');
+    }
+
+    // Verify player cannot play
+    const player = gameState.players.find(p => p.id === playerId);
+    if (!player) {
+      throw new Error('Player not found');
+    }
+
+    const canPlay = player.hand.some(card => {
+      const value = getCardValue(card);
+      return gameState.peggingState.currentCount + value <= 31;
+    });
+
+    if (canPlay) {
+      throw new Error('You must play a card if possible');
+    }
+
+    gameState.peggingState.consecutivePasses++;
+    gameState.currentPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
+
+    // If all players pass, give point to last player and reset
+    if (gameState.peggingState.consecutivePasses >= gameState.players.length) {
+      if (gameState.peggingState.lastPlayerId) {
+        gameState.scores[gameState.peggingState.lastPlayerId] += 1; // Go point
+      }
+      gameState.peggingState.pile = [];
+      gameState.peggingState.currentCount = 0;
+      gameState.peggingState.consecutivePasses = 0;
+    }
+
+    gameState.updatedAt = Date.now();
+    await this.saveGame(gameState);
+
+    this.emitGameUpdate(gameState);
+    this.triggerBotActions(gameId);
+
+    return null;
+  }
+
+  private checkForGoAndHandle(gameState: GameState): void {
+    // Skip players who can't play
+    let attempts = 0;
+    while (attempts < gameState.players.length) {
+      const currentPlayer = gameState.players[gameState.currentPlayerIndex];
+      const canPlay = currentPlayer.hand.some(card => {
+        const value = getCardValue(card);
+        return gameState.peggingState.currentCount + value <= 31;
+      });
+
+      if (canPlay || currentPlayer.hand.length === 0) {
+        break;
+      }
+
+      gameState.peggingState.consecutivePasses++;
+      gameState.currentPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.players.length;
+      attempts++;
+    }
+
+    // If all players passed, give Go point and reset
+    if (gameState.peggingState.consecutivePasses >= gameState.players.length) {
+      if (gameState.peggingState.lastPlayerId) {
+        gameState.scores[gameState.peggingState.lastPlayerId] += 1;
+      }
+      gameState.peggingState.pile = [];
+      gameState.peggingState.currentCount = 0;
+      gameState.peggingState.consecutivePasses = 0;
+    }
+  }
+
+  async continueToNextPhase(socket: Socket, gameId: string): Promise<ClientGameState | null> {
+    const playerInfo = this.socketToPlayer.get(socket.id);
+    if (!playerInfo) {
+      throw new Error('Player not in a game');
+    }
+
+    const gameState = await this.getGame(gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    if (gameState.phase === 'COUNTING_HANDS') {
+      // Score current player's hand
+      const currentPlayer = gameState.players[gameState.currentPlayerIndex];
+      const score = scoreHand(currentPlayer.hand, gameState.starter!);
+      gameState.scores[currentPlayer.id] += score.total;
+
+      // Move to next player or crib
+      gameState.currentPlayerIndex++;
+      if (gameState.currentPlayerIndex >= gameState.players.length) {
+        gameState.phase = 'COUNTING_CRIB';
+        gameState.currentPlayerIndex = gameState.dealerIndex;
+      }
+    } else if (gameState.phase === 'COUNTING_CRIB') {
+      // Score crib
+      const dealer = gameState.players[gameState.dealerIndex];
+      const score = scoreCrib(gameState.crib, gameState.starter!);
+      gameState.scores[dealer.id] += score.total;
+
+      // Check for winner
+      const winner = Object.entries(gameState.scores).find(([_, s]) => s >= gameState.winningScore);
+      if (winner) {
+        gameState.phase = 'GAME_OVER';
+      } else {
+        // Start new round
+        gameState.dealerIndex = (gameState.dealerIndex + 1) % gameState.players.length;
+        gameState.deck = shuffleDeck(createDeck());
+        gameState.crib = [];
+        gameState.starter = null;
+
+        const cardsPerPlayer = CARDS_PER_PLAYER[gameState.playerCount];
+        for (const player of gameState.players) {
+          const { dealt, remaining } = dealCards(gameState.deck, cardsPerPlayer);
+          player.hand = dealt;
+          gameState.deck = remaining;
+        }
+
+        gameState.phase = 'DISCARDING_TO_CRIB';
+        gameState.currentPlayerIndex = (gameState.dealerIndex + 1) % gameState.players.length;
+        gameState.peggingState = {
+          pile: [],
+          currentCount: 0,
+          playedCardIds: new Set(),
+          consecutivePasses: 0,
+          lastPlayerId: null,
+        };
+      }
+    }
+
+    gameState.updatedAt = Date.now();
+    await this.saveGame(gameState);
+
+    this.emitGameUpdate(gameState);
+    this.triggerBotActions(gameId);
+
+    return null;
+  }
+
+  private triggerBotActions(gameId: string): void {
+    setTimeout(async () => {
+      const gameState = await this.getGame(gameId);
+      if (!gameState) return;
+
+      for (const player of gameState.players) {
+        if (player.isBot) {
+          const bot = this.bots.get(player.id);
+          if (bot) {
+            await bot.takeTurn(gameState);
+          }
+        }
+      }
+    }, 500); // Small delay for better UX
+  }
+
+  handleDisconnect(socket: Socket): void {
+    const playerInfo = this.socketToPlayer.get(socket.id);
+    if (playerInfo) {
+      this.socketToPlayer.delete(socket.id);
+      // Mark player as disconnected
+      this.getGame(playerInfo.gameId).then(gameState => {
+        if (gameState) {
+          const player = gameState.players.find(p => p.id === playerInfo.playerId);
+          if (player) {
+            player.isConnected = false;
+            this.saveGame(gameState);
+            this.io.to(playerInfo.gameId).emit('player_disconnected', {
+              playerId: playerInfo.playerId,
+              playerName: player.name,
+            });
+          }
+        }
+      });
+    }
+  }
+
+  getPlayerId(socket: Socket): string {
+    const info = this.socketToPlayer.get(socket.id);
+    return info?.playerId || '';
+  }
+
+  async getPlayerName(gameId: string, playerId: string): Promise<string> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) return 'Unknown';
+    const player = gameState.players.find(p => p.id === playerId);
+    return player?.name || 'Unknown';
+  }
+
+  private async saveGame(gameState: GameState): Promise<void> {
+    const key = `game:${gameState.id}`;
+    // Convert Set to Array for JSON serialization
+    const serializable = {
+      ...gameState,
+      peggingState: {
+        ...gameState.peggingState,
+        playedCardIds: Array.from(gameState.peggingState.playedCardIds),
+      },
+    };
+    await this.redis.setex(key, GAME_TTL_SECONDS, JSON.stringify(serializable));
+  }
+
+  async getGame(gameId: string): Promise<GameState | null> {
+    const key = `game:${gameId}`;
+    const data = await this.redis.get(key);
+    if (!data) return null;
+    const parsed = JSON.parse(data);
+    // Convert Array back to Set
+    return {
+      ...parsed,
+      peggingState: {
+        ...parsed.peggingState,
+        playedCardIds: new Set(parsed.peggingState.playedCardIds),
+      },
+    };
+  }
+
+  private toClientState(gameState: GameState, playerId: string): ClientGameState {
+    return {
+      id: gameState.id,
+      name: gameState.name,
+      players: gameState.players.map(p => ({
+        id: p.id,
+        name: p.name,
+        isBot: p.isBot,
+        isConnected: p.isConnected,
+        handCount: p.hand.length,
+        hand: p.id === playerId ? p.hand : undefined,
+        teamId: p.teamId,
+      })),
+      cribCount: gameState.crib.length,
+      starter: gameState.starter,
+      currentPlayerIndex: gameState.currentPlayerIndex,
+      dealerIndex: gameState.dealerIndex,
+      phase: gameState.phase,
+      peggingState: {
+        pile: gameState.peggingState.pile,
+        currentCount: gameState.peggingState.currentCount,
+        playedCardIds: Array.from(gameState.peggingState.playedCardIds),
+        consecutivePasses: gameState.peggingState.consecutivePasses,
+        lastPlayerId: gameState.peggingState.lastPlayerId,
+      },
+      scores: gameState.scores,
+      winningScore: gameState.winningScore,
+      playerCount: gameState.playerCount,
+      myPlayerId: playerId,
+    };
+  }
+
+  private emitGameUpdate(gameState: GameState): void {
+    for (const player of gameState.players) {
+      if (!player.isBot) {
+        const socket = this.getSocketByPlayerId(player.id);
+        if (socket) {
+          socket.emit('game_updated', this.toClientState(gameState, player.id));
+        }
+      }
+    }
+  }
+
+  private getSocketByPlayerId(playerId: string): Socket | null {
+    for (const [socketId, info] of this.socketToPlayer) {
+      if (info.playerId === playerId) {
+        return this.io.sockets.sockets.get(socketId) || null;
+      }
+    }
+    return null;
+  }
+}
