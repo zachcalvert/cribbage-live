@@ -97,7 +97,7 @@ export default function GameBoard() {
   // Loading state
   if (!isConnected) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="h-screen flex items-center justify-center">
         <div className="text-white text-xl">Connecting...</div>
       </div>
     );
@@ -116,35 +116,35 @@ export default function GameBoard() {
   // No game state yet
   if (!gameState) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="h-screen flex items-center justify-center">
         <div className="text-white text-xl">Loading game...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex flex-col lg:flex-row">
+    <div className="h-screen flex flex-col lg:flex-row overflow-hidden">
       {/* Main Game Area */}
-      <div className="flex-1 p-4 flex flex-col">
+      <div className="flex-1 p-3 lg:p-4 flex flex-col min-h-0 overflow-hidden">
         {/* Header */}
-        <div className="flex justify-between items-center mb-4">
-          <Link to="/" className="text-amber-300 hover:text-amber-200">
+        <div className="flex justify-between items-center mb-2 lg:mb-4 flex-shrink-0">
+          <Link to="/" className="text-amber-300 hover:text-amber-200 text-sm lg:text-base">
             &larr; Leave Game
           </Link>
           <div className="text-center">
-            <h1 className="text-xl font-bold text-white">{gameState.name}</h1>
-            <p className="text-green-200 text-sm">
+            <h1 className="text-lg lg:text-xl font-bold text-white">{gameState.name}</h1>
+            <p className="text-green-200 text-xs lg:text-sm">
               {getPhaseDescription(gameState.phase)}
             </p>
           </div>
-          <div className="text-green-200 text-sm">
+          <div className="text-green-200 text-xs lg:text-sm">
             {gameState.players.length}/{gameState.playerCount} players
           </div>
         </div>
 
         {error && (
-          <div className="bg-red-500/20 border border-red-400 text-red-100 px-4 py-2 rounded-lg mb-4 flex justify-between items-center">
-            <span>{error}</span>
+          <div className="bg-red-500/20 border border-red-400 text-red-100 px-4 py-2 rounded-lg mb-2 flex justify-between items-center flex-shrink-0">
+            <span className="text-sm">{error}</span>
             <button onClick={clearError} className="text-red-200 hover:text-white">
               &times;
             </button>
@@ -153,18 +153,18 @@ export default function GameBoard() {
 
         {/* Waiting for Players */}
         {gameState.phase === 'WAITING_FOR_PLAYERS' && (
-          <div className="flex-1 flex flex-col items-center justify-center">
-            <div className="bg-amber-900/30 rounded-lg p-8 text-center max-w-md">
-              <h2 className="text-2xl font-bold text-white mb-4">Waiting for Players</h2>
-              <p className="text-green-200 mb-4">
+          <div className="flex-1 flex flex-col items-center justify-center min-h-0">
+            <div className="bg-amber-900/30 rounded-lg p-6 lg:p-8 text-center max-w-md">
+              <h2 className="text-xl lg:text-2xl font-bold text-white mb-4">Waiting for Players</h2>
+              <p className="text-green-200 mb-4 text-sm lg:text-base">
                 Share this link with friends to join:
               </p>
-              <div className="bg-gray-800 rounded px-4 py-2 font-mono text-amber-300 mb-6 break-all">
+              <div className="bg-gray-800 rounded px-3 py-2 font-mono text-amber-300 mb-6 break-all text-xs lg:text-sm">
                 {window.location.href}
               </div>
               <div className="space-y-2 mb-6">
                 {gameState.players.map((player, index) => (
-                  <div key={player.id} className="text-green-100">
+                  <div key={player.id} className="text-green-100 text-sm lg:text-base">
                     {index + 1}. {player.name}
                     {player.isBot && <span className="text-gray-400"> [Bot]</span>}
                     {player.id === gameState.myPlayerId && <span className="text-amber-300"> (you)</span>}
@@ -174,7 +174,7 @@ export default function GameBoard() {
               {gameState.players.length === gameState.playerCount && (
                 <button
                   onClick={handleStartGame}
-                  className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-3 px-8 rounded-lg transition-colors"
+                  className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 lg:py-3 px-6 lg:px-8 rounded-lg transition-colors"
                 >
                   Start Game
                 </button>
@@ -185,9 +185,9 @@ export default function GameBoard() {
 
         {/* Active Game */}
         {gameState.phase !== 'WAITING_FOR_PLAYERS' && gameState.phase !== 'GAME_OVER' && (
-          <div className="flex-1 flex flex-col">
+          <div className="flex-1 flex flex-col min-h-0 justify-between">
             {/* Other Players' Hands */}
-            <div className="flex justify-center gap-8 mb-6 flex-wrap">
+            <div className="flex justify-center gap-4 lg:gap-8 flex-wrap flex-shrink-0">
               {gameState.players
                 .filter(p => p.id !== gameState.myPlayerId)
                 .map((player, index) => (
@@ -202,15 +202,17 @@ export default function GameBoard() {
             </div>
 
             {/* Play Area */}
-            <PlayArea
-              peggingState={gameState.peggingState}
-              starter={gameState.starter}
-              cribCount={gameState.cribCount}
-              isDealer={isDealer}
-            />
+            <div className="flex-1 flex items-center justify-center py-2 lg:py-4 min-h-0">
+              <PlayArea
+                peggingState={gameState.peggingState}
+                starter={gameState.starter}
+                cribCount={gameState.cribCount}
+                isDealer={isDealer}
+              />
+            </div>
 
             {/* My Hand */}
-            <div className="mt-6">
+            <div className="flex-shrink-0">
               <Hand
                 cards={currentPlayer?.hand}
                 selectedCards={selectedCards}
@@ -219,66 +221,66 @@ export default function GameBoard() {
                 label={`${currentPlayer?.name || 'You'} (you)`}
                 isCurrentPlayer={isMyTurn}
               />
-            </div>
 
-            {/* Action Buttons */}
-            <div className="mt-6 flex justify-center gap-4">
-              {gameState.phase === 'DISCARDING_TO_CRIB' && (
-                <button
-                  onClick={handleDiscard}
-                  disabled={selectedCards.length !== DISCARDS_PER_PLAYER[gameState.playerCount]}
-                  className="bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold py-2 px-6 rounded-lg transition-colors"
-                >
-                  Discard to Crib ({selectedCards.length}/{DISCARDS_PER_PLAYER[gameState.playerCount]})
-                </button>
-              )}
+              {/* Action Buttons */}
+              <div className="mt-3 lg:mt-4 flex justify-center gap-4">
+                {gameState.phase === 'DISCARDING_TO_CRIB' && (
+                  <button
+                    onClick={handleDiscard}
+                    disabled={selectedCards.length !== DISCARDS_PER_PLAYER[gameState.playerCount]}
+                    className="bg-amber-600 hover:bg-amber-500 disabled:bg-gray-600 disabled:cursor-not-allowed text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
+                  >
+                    Discard to Crib ({selectedCards.length}/{DISCARDS_PER_PLAYER[gameState.playerCount]})
+                  </button>
+                )}
 
-              {gameState.phase === 'PEGGING' && isMyTurn && !canPlayAnyCard && (
-                <button
-                  onClick={handlePass}
-                  className="bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-6 rounded-lg transition-colors"
-                >
-                  Go (Can't Play)
-                </button>
-              )}
+                {gameState.phase === 'PEGGING' && isMyTurn && !canPlayAnyCard && (
+                  <button
+                    onClick={handlePass}
+                    className="bg-red-600 hover:bg-red-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
+                  >
+                    Go (Can't Play)
+                  </button>
+                )}
 
-              {(gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB') && (
-                <button
-                  onClick={handleContinue}
-                  className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 px-6 rounded-lg transition-colors"
-                >
-                  Continue
-                </button>
-              )}
-            </div>
-
-            {/* Turn Indicator */}
-            {gameState.phase === 'PEGGING' && (
-              <div className="mt-4 text-center">
-                {isMyTurn ? (
-                  <span className="text-amber-300 font-bold">Your turn!</span>
-                ) : (
-                  <span className="text-green-200">
-                    Waiting for {gameState.players[gameState.currentPlayerIndex]?.name}...
-                  </span>
+                {(gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB') && (
+                  <button
+                    onClick={handleContinue}
+                    className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"
+                  >
+                    Continue
+                  </button>
                 )}
               </div>
-            )}
+
+              {/* Turn Indicator */}
+              {gameState.phase === 'PEGGING' && (
+                <div className="mt-2 lg:mt-3 text-center">
+                  {isMyTurn ? (
+                    <span className="text-amber-300 font-bold text-sm lg:text-base">Your turn!</span>
+                  ) : (
+                    <span className="text-green-200 text-sm lg:text-base">
+                      Waiting for {gameState.players[gameState.currentPlayerIndex]?.name}...
+                    </span>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         {/* Game Over */}
         {gameState.phase === 'GAME_OVER' && (
           <div className="flex-1 flex items-center justify-center">
-            <div className="bg-amber-900/30 rounded-lg p-8 text-center">
-              <h2 className="text-3xl font-bold text-white mb-4">Game Over!</h2>
+            <div className="bg-amber-900/30 rounded-lg p-6 lg:p-8 text-center">
+              <h2 className="text-2xl lg:text-3xl font-bold text-white mb-4">Game Over!</h2>
               <div className="space-y-2 mb-6">
                 {Object.entries(gameState.scores)
                   .sort(([, a], [, b]) => b - a)
                   .map(([playerId, score], index) => {
                     const player = gameState.players.find(p => p.id === playerId);
                     return (
-                      <div key={playerId} className="text-xl">
+                      <div key={playerId} className="text-lg lg:text-xl">
                         <span className={index === 0 ? 'text-amber-300 font-bold' : 'text-green-100'}>
                           {index + 1}. {player?.name || 'Unknown'}: {score}
                         </span>
@@ -289,7 +291,7 @@ export default function GameBoard() {
               </div>
               <Link
                 to="/"
-                className="inline-block bg-amber-600 hover:bg-amber-500 text-white font-bold py-3 px-8 rounded-lg transition-colors"
+                className="inline-block bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 lg:py-3 px-6 lg:px-8 rounded-lg transition-colors"
               >
                 Play Again
               </Link>
@@ -298,8 +300,9 @@ export default function GameBoard() {
         )}
       </div>
 
-      {/* Sidebar */}
-      <div className="w-full lg:w-80 p-4 flex flex-col gap-4">
+      {/* Sidebar - Score & Chat */}
+      <div className="w-full lg:w-96 p-3 lg:p-4 flex flex-col gap-3 lg:gap-4 flex-shrink-0 lg:h-screen lg:overflow-hidden
+                      max-h-[40vh] lg:max-h-none">
         <ScoreBoard
           players={gameState.players}
           scores={gameState.scores}
@@ -307,7 +310,7 @@ export default function GameBoard() {
           dealerIndex={gameState.dealerIndex}
           currentPlayerIndex={gameState.currentPlayerIndex}
         />
-        <div className="flex-1">
+        <div className="flex-1 min-h-0 overflow-hidden">
           <ChatWindow
             messages={messages}
             onSendMessage={handleSendChat}
