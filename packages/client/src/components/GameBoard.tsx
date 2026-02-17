@@ -301,7 +301,8 @@ export default function GameBoard() {
                 </button>
               )}
 
-              {(gameState.phase === 'COUNTING_HANDS' || gameState.phase === 'COUNTING_CRIB') && (
+              {((gameState.phase === 'COUNTING_HANDS' && isMyTurn) ||
+                (gameState.phase === 'COUNTING_CRIB' && isDealer)) && (
                 <button
                   onClick={handleContinue}
                   className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"

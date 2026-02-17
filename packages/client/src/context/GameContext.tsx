@@ -1,6 +1,32 @@
-import React, { createContext, useContext, useReducer, useCallback, useEffect } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useEffect, useRef } from 'react';
 import type { ClientGameState, ChatMessage } from '@cribbage/shared';
 import { useSocket } from '../hooks/useSocket';
+
+// Store session info in localStorage for reconnection
+const SESSION_KEY = 'cribbage_session';
+
+interface SessionInfo {
+  gameId: string;
+  playerId: string;
+}
+
+function saveSession(gameId: string, playerId: string): void {
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ gameId, playerId }));
+}
+
+function getSession(): SessionInfo | null {
+  const data = localStorage.getItem(SESSION_KEY);
+  if (!data) return null;
+  try {
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
+function clearSession(): void {
+  localStorage.removeItem(SESSION_KEY);
+}
 
 interface GameContextState {
   gameState: ClientGameState | null;
@@ -62,22 +88,54 @@ const GameContext = createContext<GameContextValue | null>(null);
 export function GameProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(gameReducer, initialState);
   const { socket, isConnected } = useSocket();
+  const hasAttemptedRejoin = useRef(false);
 
   useEffect(() => {
     dispatch({ type: 'SET_CONNECTED', payload: isConnected });
   }, [isConnected]);
 
+  // Attempt to rejoin game on reconnect
+  useEffect(() => {
+    if (!socket || !isConnected) {
+      hasAttemptedRejoin.current = false;
+      return;
+    }
+
+    // Only attempt rejoin once per connection and if we don't already have a game state
+    if (hasAttemptedRejoin.current || state.gameState) return;
+    hasAttemptedRejoin.current = true;
+
+    const session = getSession();
+    if (session) {
+      console.log('Attempting to rejoin game:', session.gameId);
+      socket.emit('rejoin_game', { gameId: session.gameId, playerId: session.playerId });
+    }
+  }, [socket, isConnected, state.gameState]);
+
   useEffect(() => {
     if (!socket) return;
 
     socket.on('game_created', ({ gameState }: { gameState: ClientGameState }) => {
+      saveSession(gameState.id, gameState.myPlayerId);
       dispatch({ type: 'SET_GAME_STATE', payload: gameState });
       dispatch({ type: 'SET_LOADING', payload: false });
     });
 
     socket.on('player_joined', ({ gameState }: { gameState: ClientGameState }) => {
+      saveSession(gameState.id, gameState.myPlayerId);
       dispatch({ type: 'SET_GAME_STATE', payload: gameState });
       dispatch({ type: 'SET_LOADING', payload: false });
+    });
+
+    socket.on('game_rejoined', ({ gameState }: { gameState: ClientGameState }) => {
+      console.log('Successfully rejoined game');
+      saveSession(gameState.id, gameState.myPlayerId);
+      dispatch({ type: 'SET_GAME_STATE', payload: gameState });
+    });
+
+    socket.on('rejoin_failed', ({ message }: { message: string }) => {
+      console.log('Failed to rejoin game:', message);
+      clearSession();
     });
 
     socket.on('game_started', (gameState: ClientGameState) => {
@@ -106,14 +164,27 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       }});
     });
 
+    socket.on('player_reconnected', ({ playerName }: { playerName: string }) => {
+      dispatch({ type: 'ADD_MESSAGE', payload: {
+        id: `system-${Date.now()}`,
+        playerId: 'system',
+        playerName: 'System',
+        message: `${playerName} reconnected`,
+        timestamp: Date.now(),
+      }});
+    });
+
     return () => {
       socket.off('game_created');
       socket.off('player_joined');
+      socket.off('game_rejoined');
+      socket.off('rejoin_failed');
       socket.off('game_started');
       socket.off('game_updated');
       socket.off('chat_message');
       socket.off('error');
       socket.off('player_disconnected');
+      socket.off('player_reconnected');
     };
   }, [socket]);
 

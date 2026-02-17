@@ -4,6 +4,7 @@ import { GameManager } from '../game/GameManager.js';
 import type {
   CreateGamePayload,
   JoinGamePayload,
+  RejoinGamePayload,
   DiscardToCribPayload,
   PlayCardPayload,
   SendChatPayload,
@@ -31,6 +32,16 @@ export function setupSocketHandlers(io: Server, redis: Redis): GameManager {
         io.to(payload.gameId).emit('player_joined', result);
       } catch (error) {
         socket.emit('error', { message: (error as Error).message });
+      }
+    });
+
+    socket.on('rejoin_game', async (payload: RejoinGamePayload) => {
+      try {
+        const result = await gameManager.rejoinGame(socket, payload.gameId, payload.playerId);
+        socket.join(payload.gameId);
+        socket.emit('game_rejoined', result);
+      } catch (error) {
+        socket.emit('rejoin_failed', { message: (error as Error).message });
       }
     });
 

@@ -99,6 +99,11 @@ export interface SendChatPayload {
   message: string;
 }
 
+export interface RejoinGamePayload {
+  gameId: string;
+  playerId: string;
+}
+
 // Client-side game state (with hidden info redacted)
 export interface ClientGameState {
   id: string;

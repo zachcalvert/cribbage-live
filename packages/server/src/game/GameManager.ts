@@ -290,6 +290,38 @@ export class GameManager {
     return { player, gameState: this.toClientState(gameState, playerId) };
   }
 
+  async rejoinGame(socket: Socket, gameId: string, playerId: string): Promise<{ gameState: ClientGameState }> {
+    const gameState = await this.getGame(gameId);
+    if (!gameState) {
+      throw new Error('Game not found');
+    }
+
+    const player = gameState.players.find(p => p.id === playerId);
+    if (!player) {
+      throw new Error('Player not found in game');
+    }
+
+    // Re-establish the socket to player mapping
+    this.socketToPlayer.set(socket.id, { gameId, playerId });
+
+    // Mark player as connected
+    player.isConnected = true;
+    gameState.updatedAt = Date.now();
+
+    await this.saveGame(gameState);
+
+    // Announce the rejoin
+    this.announce(gameId, `${player.name} reconnected :blob-wave:`);
+
+    // Notify other players
+    this.io.to(gameId).emit('player_reconnected', {
+      playerId,
+      playerName: player.name,
+    });
+
+    return { gameState: this.toClientState(gameState, playerId) };
+  }
+
   async addBot(gameId: string): Promise<void> {
     const gameState = await this.getGame(gameId);
     if (!gameState) return;
@@ -673,6 +705,19 @@ export class GameManager {
     const gameState = await this.getGame(gameId);
     if (!gameState) {
       throw new Error('Game not found');
+    }
+
+    // Validate that the clicking player is the one whose turn it is to score
+    if (gameState.phase === 'COUNTING_HANDS') {
+      const currentPlayer = gameState.players[gameState.currentPlayerIndex];
+      if (playerInfo.playerId !== currentPlayer.id) {
+        throw new Error('It is not your turn to score');
+      }
+    } else if (gameState.phase === 'COUNTING_CRIB') {
+      const dealer = gameState.players[gameState.dealerIndex];
+      if (playerInfo.playerId !== dealer.id) {
+        throw new Error('Only the dealer can score the crib');
+      }
     }
 
     if (gameState.phase === 'COUNTING_HANDS') {
