@@ -84,8 +84,12 @@ export default function GameBoard() {
 
   // Find current player info
   const currentPlayer = gameState?.players.find(p => p.id === gameState?.myPlayerId);
-  const isMyTurn = gameState?.players[gameState?.currentPlayerIndex ?? 0]?.id === gameState?.myPlayerId;
-  const isDealer = gameState?.players[gameState?.dealerIndex ?? 0]?.id === gameState?.myPlayerId;
+  const activePlayer = gameState?.players[gameState?.currentPlayerIndex ?? 0];
+  const dealer = gameState?.players[gameState?.dealerIndex ?? 0];
+  const isMyTurn = activePlayer?.id === gameState?.myPlayerId;
+  const isDealer = dealer?.id === gameState?.myPlayerId;
+  const isCurrentPlayerBot = activePlayer?.isBot ?? false;
+  const isDealerBot = dealer?.isBot ?? false;
 
   // Calculate if player can play any card
   const canPlayAnyCard = currentPlayer?.hand?.some(card => {
@@ -301,8 +305,8 @@ export default function GameBoard() {
                 </button>
               )}
 
-              {((gameState.phase === 'COUNTING_HANDS' && isMyTurn) ||
-                (gameState.phase === 'COUNTING_CRIB' && isDealer)) && (
+              {((gameState.phase === 'COUNTING_HANDS' && (isMyTurn || isCurrentPlayerBot)) ||
+                (gameState.phase === 'COUNTING_CRIB' && (isDealer || isDealerBot))) && (
                 <button
                   onClick={handleContinue}
                   className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-2 px-4 lg:px-6 rounded-lg transition-colors text-sm lg:text-base"

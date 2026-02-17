@@ -708,14 +708,17 @@ export class GameManager {
     }
 
     // Validate that the clicking player is the one whose turn it is to score
+    // Exception: any human can advance when it's a bot's turn (humans control the pace)
     if (gameState.phase === 'COUNTING_HANDS') {
       const currentPlayer = gameState.players[gameState.currentPlayerIndex];
-      if (playerInfo.playerId !== currentPlayer.id) {
+      const isCurrentPlayerBot = currentPlayer.isBot;
+      if (playerInfo.playerId !== currentPlayer.id && !isCurrentPlayerBot) {
         throw new Error('It is not your turn to score');
       }
     } else if (gameState.phase === 'COUNTING_CRIB') {
       const dealer = gameState.players[gameState.dealerIndex];
-      if (playerInfo.playerId !== dealer.id) {
+      const isDealerBot = dealer.isBot;
+      if (playerInfo.playerId !== dealer.id && !isDealerBot) {
         throw new Error('Only the dealer can score the crib');
       }
     }
